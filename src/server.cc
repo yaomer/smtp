@@ -3,7 +3,8 @@
 // See https://www.rfc-editor.org/rfc/rfc5321.html
 //
 
-#include "smtp_server.h"
+#include "server.h"
+#include "smtp_types.h"
 
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -11,6 +12,8 @@
 #include <uuid/uuid.h>
 
 #include <regex>
+
+namespace smtp {
 
 const char *mail_queue = ".mail_queue";
 const char *mail_sent = ".mail_sent";
@@ -20,7 +23,7 @@ static const int max_mail_size = 1024 * 1024 * 70; // 70M
 static const int max_cmdline_size = 512;
 static const int ttl = 30 * 1000;
 
-struct smtp_context {
+struct context {
     enum { Prepare, Ready, Mail, Rcpt, Data };
     bool cmd_verify(angel::buffer&);
     bool parse_mail(angel::buffer&);
@@ -76,7 +79,7 @@ static std::string get_mail_filename(std::string_view username)
     return filename.append("/").append(username).append("-").append(generate_id()).append(".mail");
 }
 
-smtp_server::smtp_server(angel::evloop *loop, angel::inet_addr listen_addr)
+server::server(angel::evloop *loop, angel::inet_addr listen_addr)
     : smtp(loop, listen_addr)
 {
     mkdir(mail_queue, 0744);
@@ -84,7 +87,7 @@ smtp_server::smtp_server(angel::evloop *loop, angel::inet_addr listen_addr)
     mkdir(tmpdir, 0744);
     smtp.set_connection_handler([listen_addr](const angel::connection_ptr& conn){
             conn->format_send("220 %s Simple Mail Transfer Service Ready\r\n", listen_addr.to_host());
-            conn->set_context(smtp_context());
+            conn->set_context(context());
             });
     smtp.set_message_handler([this](const angel::connection_ptr& conn, angel::buffer& buf){
             this->receive_mail(conn, buf);
@@ -93,19 +96,15 @@ smtp_server::smtp_server(angel::evloop *loop, angel::inet_addr listen_addr)
     smtp.start();
 }
 
-enum CommandType {
-    EHLO, HELO, MAIL, RCPT, DATA, RSET, VRFY, EXPN, HELP, NOOP, QUIT
-};
-
 static const char *ok = "250 OK\r\n";
 
 // mail transaction: MAIL, RCPT(0 or more), DATA
-void smtp_server::receive_mail(const angel::connection_ptr& conn, angel::buffer& buf)
+void server::receive_mail(const angel::connection_ptr& conn, angel::buffer& buf)
 {
-    smtp_context& ctx = std::any_cast<smtp_context&>(conn->get_context());
+    context& ctx = std::any_cast<context&>(conn->get_context());
     while (buf.readable() > 0) {
 
-        if (ctx.state == smtp_context::Data) {
+        if (ctx.state == context::Data) {
             if (!ctx.recv_data(conn, buf)) return;
             continue;
         }
@@ -163,7 +162,7 @@ retrieve:
     }
 }
 
-void smtp_context::bad_sequence(const angel::connection_ptr& conn)
+void context::bad_sequence(const angel::connection_ptr& conn)
 {
     switch (cmd) {
     case MAIL: conn->send("503 Send command HELO/EHLO first.\r\n"); break;
@@ -172,7 +171,7 @@ void smtp_context::bad_sequence(const angel::connection_ptr& conn)
     }
 }
 
-void smtp_context::do_mail_transaction(const angel::connection_ptr& conn, angel::buffer& buf)
+void context::do_mail_transaction(const angel::connection_ptr& conn, angel::buffer& buf)
 {
     switch (state) {
     case Ready:
@@ -214,7 +213,7 @@ void smtp_context::do_mail_transaction(const angel::connection_ptr& conn, angel:
     }
 }
 
-bool smtp_context::parse_mail(angel::buffer& buf)
+bool context::parse_mail(angel::buffer& buf)
 {
     const char *p = buf.peek();
     p += 10; // skip 'MAIL FROM:'
@@ -227,7 +226,7 @@ bool smtp_context::parse_mail(angel::buffer& buf)
     return true;
 }
 
-bool smtp_context::parse_rcpt(angel::buffer& buf)
+bool context::parse_rcpt(angel::buffer& buf)
 {
     const char *p = buf.peek();
     p += 8; // skip 'RCPT TO:'
@@ -240,7 +239,7 @@ bool smtp_context::parse_rcpt(angel::buffer& buf)
     return true;
 }
 
-void smtp_context::ready_recv_data()
+void context::ready_recv_data()
 {
     char tmpfile[] = "tmp.XXXXXX";
     mktemp(tmpfile);
@@ -268,7 +267,7 @@ void smtp_context::ready_recv_data()
     recv_size = 0;
 }
 
-bool smtp_context::recv_data(const angel::connection_ptr& conn, angel::buffer& buf)
+bool context::recv_data(const angel::connection_ptr& conn, angel::buffer& buf)
 {
     // 在没有读到结束标记<CRLF>.<CRLF>时，我们需要在buf中保留4个字符
     if (buf.readable() < 5) return false;
@@ -301,7 +300,7 @@ bool smtp_context::recv_data(const angel::connection_ptr& conn, angel::buffer& b
     return true;
 }
 
-void smtp_context::write_to_file(const char *buf, size_t len)
+void context::write_to_file(const char *buf, size_t len)
 {
     while (len > 0) {
         ssize_t n = write(fd, buf, len);
@@ -327,7 +326,7 @@ static const char *help = "HELP";
 static const char *noop = "NOOP";
 static const char *quit = "QUIT";
 
-bool smtp_context::cmd_verify(angel::buffer& buf)
+bool context::cmd_verify(angel::buffer& buf)
 {
     const char *s = nullptr;
     const char *p = buf.peek();
@@ -364,9 +363,4 @@ bool smtp_context::cmd_verify(angel::buffer& buf)
     return s && buf.starts_with_case(s) && isspace(c);
 }
 
-int main()
-{
-    angel::evloop loop;
-    smtp_server smtp(&loop, angel::inet_addr(8000));
-    loop.run();
 }
