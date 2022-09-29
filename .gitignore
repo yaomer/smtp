@@ -1,6 +1,4 @@
 a.out
-.mail_queue
-.mail_sent
+mail-dir
 .tmp
 .log
-test.cc

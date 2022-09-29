@@ -4,20 +4,18 @@
 //
 
 #include "server.h"
-#include "smtp_types.h"
 
-#include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <uuid/uuid.h>
 
 #include <regex>
 
+#include "config.h"
+
 namespace smtp {
 
-const char *mail_queue = ".mail_queue";
-const char *mail_sent = ".mail_sent";
-const char *tmpdir = ".tmp";
+static config *conf;
 
 static const int max_mail_size = 1024 * 1024 * 70; // 70M
 static const int max_cmdline_size = 512;
@@ -75,16 +73,14 @@ static std::string generate_id()
 
 static std::string get_mail_filename(std::string_view username)
 {
-    std::string filename(mail_queue);
+    std::string filename(conf->queue_dir);
     return filename.append("/").append(username).append("-").append(generate_id()).append(".mail");
 }
 
 server::server(angel::evloop *loop, angel::inet_addr listen_addr)
     : smtp(loop, listen_addr)
 {
-    mkdir(mail_queue, 0744);
-    mkdir(mail_sent, 0744);
-    mkdir(tmpdir, 0744);
+    conf = config::get_config("");
     smtp.set_connection_handler([listen_addr](const angel::connection_ptr& conn){
             conn->format_send("220 %s Simple Mail Transfer Service Ready\r\n", listen_addr.to_host());
             conn->set_context(context());
@@ -95,6 +91,10 @@ server::server(angel::evloop *loop, angel::inet_addr listen_addr)
     smtp.set_connection_ttl(ttl);
     smtp.start();
 }
+
+enum CommandType {
+    EHLO, HELO, MAIL, RCPT, DATA, RSET, VRFY, EXPN, HELP, NOOP, QUIT
+};
 
 static const char *ok = "250 OK\r\n";
 
@@ -244,7 +244,7 @@ void context::ready_recv_data()
     char tmpfile[] = "tmp.XXXXXX";
     mktemp(tmpfile);
 
-    filename = tmpdir;
+    filename = conf->tmp_dir;
     filename.append("/").append(tmpfile);
 
     fd = open(filename.c_str(), O_RDWR | O_APPEND | O_CREAT, 0644);
